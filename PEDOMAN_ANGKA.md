@@ -1,3 +1,7 @@
+# Catatan v0.4
+
+Dokumen berikut adalah panduan versi lama. Untuk menjalankan web terbaru dan aturan pribadi, gunakan **MULAI_V04.md** dan **ATURAN_KALIBRASI.md**.
+
 # Angka dan asal rancangan
 
 PDF: Ringkasan_Pedoman_STS_dan_Toleransi.pdf, ringkasan diskusi 12 Oktober 2026. Tercantum di PDF tidak berarti terverifikasi dari artikel asli.

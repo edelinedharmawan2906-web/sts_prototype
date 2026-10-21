@@ -14,7 +14,7 @@ def landmarks(p=0.,lean=0.):
 def run_demo(client):
     def call(method,path,body=None):
         r=client.request(method,path,json=body);r.raise_for_status();return r.json()
-    sid=call('POST','/sessions',{'width':640,'height':480})['session_id'];t=0.
+    sid=call('POST','/sessions',{'width':640,'height':480,'input_source':'simulation'})['session_id'];t=0.
     def frames(n,p,lean=0):
         nonlocal t
         for i in range(n):
@@ -22,9 +22,9 @@ def run_demo(client):
             result=call('POST',f'/sessions/{sid}/frames',{'t':round(t,6),'landmarks':landmarks(progress,lean)})
             t+=.05
         return result
-    call('POST',f'/sessions/{sid}/calibration',{'posture':'duduk','delay':0});frames(30,0)
+    call('POST',f'/sessions/{sid}/calibration',{'posture':'duduk','delay':0});frames(55,0)
     frames(45,1)
-    call('POST',f'/sessions/{sid}/calibration',{'posture':'berdiri','delay':0});frames(30,1)
+    call('POST',f'/sessions/{sid}/calibration',{'posture':'berdiri','delay':0});frames(55,1)
     frames(50,0);frames(20,0,28);frames(35,lambda p:p,28);frames(50,1)
     frames(35,lambda p:1-p);result=frames(45,0)
     return sid,result

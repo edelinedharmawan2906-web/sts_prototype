@@ -63,6 +63,29 @@ class Engine:
         self.lean_base = 0.
         self.lean_sd = 1.
 
+    def sitting_matches(self, hip, lean, thigh, ankle):
+        c=self.cfg
+        return bool(abs(hip-90)<=c.sitting_tolerance and lean<=c.sitting_tolerance and thigh<=c.sitting_tolerance and ankle<=.15)
+
+    def seated_geometry(self, hip):
+        return hip < 120
+
+    def sitting_sample_gate(self, lean, progress):
+        return lean <= self.lean_base+max(3*self.lean_sd,3) and progress<=self.cfg.seated_progress
+
+    def preparation_threshold(self):
+        return self.lean_base+max(3*self.lean_sd,3)
+
+    def standing_targets(self):
+        return 180-self.cfg.straight_tolerance, 180-self.cfg.straight_tolerance
+
+    def make_report(self, success):
+        from assessment import stage_report
+        return stage_report(self.initial_sitting_details,self.initial_sitting,self.peak,success,self.observation_missing,self.standing_measurements,self.cfg)
+
+    def on_rise_started(self, t):
+        pass
+
     def held(self, key, condition, t):
         if not condition:
             self.since.pop(key, None)
@@ -117,9 +140,9 @@ class Engine:
         self.velocity = v
         self.last_t, self.last_p = t, p
         if self.state in ('DUDUK', 'PERSIAPAN'):
-            seated_pose = lean <= self.lean_base+max(3*self.lean_sd,3) and p<=c.seated_progress
+            seated_pose = self.sitting_sample_gate(lean,p)
             bounded_snapshot = self.sitting_evidence.update(t,p,hip,lean,thigh,ankle,seated_pose,c.stable_speed)
-            baseline_pose = lean <= self.lean_base+max(3*self.lean_sd,3) and p<=c.seated_progress and v is not None and abs(v)<=c.stable_speed
+            baseline_pose = seated_pose and v is not None and abs(v)<=c.stable_speed
             if baseline_pose:
                 self.sitting_samples.append((t, float(hip), float(lean), float(thigh), float(ankle)))
                 while self.sitting_samples and t-self.sitting_samples[0][0]>c.sitting_window+1e-9:
@@ -130,7 +153,7 @@ class Engine:
                     self.sitting_details={'hip':h,'lean':l,'thigh':th,'ankle':an}
                     self.last_sitting_t=t
                     self.sitting_history={'time':float(t),'measurement':dict(self.sitting_details)}
-                    self.last_sitting=bool(abs(h-90)<=c.sitting_tolerance and l<=c.sitting_tolerance and th<=c.sitting_tolerance and an<=.15)
+                    self.last_sitting=self.sitting_matches(h,l,th,an)
             else:
                 self.sitting_samples.clear()
             if bounded_snapshot is not None and self.last_sitting_t != t:
@@ -139,7 +162,7 @@ class Engine:
                 self.last_sitting_t=t
                 self.sitting_history={'time':float(t),'measurement':dict(bounded_snapshot)}
                 h,l,th,an=[bounded_snapshot[k] for k in ('hip','lean','thigh','ankle')]
-                self.last_sitting=bool(abs(h-90)<=c.sitting_tolerance and l<=c.sitting_tolerance and th<=c.sitting_tolerance and an<=.15)
+                self.last_sitting=self.sitting_matches(h,l,th,an)
             # Upright, stable samples during preparation can form a NEW
             # baseline before a rise. Never reuse a moving/leaning frame.
             if self.state == 'PERSIAPAN' and self.last_sitting_t == t:
@@ -149,16 +172,16 @@ class Engine:
                 self.initial_sitting_details = dict(self.sitting_details)
         if self.state == 'DUDUK':
             # Counting needs an observed seated origin, not a passing posture score.
-            seated = p<=c.seated_progress and hip<120
+            seated = p<=c.seated_progress and self.seated_geometry(hip)
             if self.held('seat_seen', seated, t): self.seated_anchor_t=t
             anchor_fresh = self.seated_anchor_t is not None and 0<=t-self.seated_anchor_t<=c.seated_evidence_max_age
-            ready = abs(hip-90) <= c.sitting_tolerance and lean <= c.sitting_tolerance and thigh <= c.sitting_tolerance and ankle <= .15
+            ready = self.sitting_matches(hip,lean,thigh,ankle)
             # A speed/8% candidate must also leave the seated height band.
             # Low/no lean still does not prevent counting a visible rise.
             if anchor_fresh and self.held('count_rise', self.rise_threshold is not None and v is not None and v>self.rise_threshold and p>.08, t) and p>c.seated_progress:
                 self.begin_attempt(self.since['count_rise'], lean, hand, 'BANGKIT')
                 return 'Bangkit terdeteksi; asesmen duduk mengikuti ketersediaan data'
-            if anchor_fresh and self.held('onset', p < .4 and lean > self.lean_base+max(3*self.lean_sd, 3), t):
+            if anchor_fresh and self.held('onset', p < .4 and lean > self.preparation_threshold(), t):
                 self.begin_attempt(self.since['onset'], lean, hand, 'PERSIAPAN')
                 return 'Persiapan: condong terdeteksi; menunggu kenaikan pinggul'
             if self.last_sitting is None:
@@ -172,14 +195,16 @@ class Engine:
             if self.state == 'PERSIAPAN':
                 self.peak = max(self.peak, lean)
                 if self.held('rise', self.rise_threshold is not None and v is not None and v > self.rise_threshold and p > .08, t) and p>c.seated_progress:
+                    self.on_rise_started(self.since['rise'])
                     self.state = 'BANGKIT'
                     self.rise_attempts += 1
                     self.since.clear()
-                elif self.held('cancel', lean <= self.lean_base+3 and p < .1 and hip < 120, t):
+                elif self.held('cancel', lean <= self.lean_base+3 and p < .1 and self.seated_geometry(hip), t):
                     self.discard_preparation(t)
                     return 'Persiapan dibatalkan; belum ada bangkit terdeteksi'
                 return 'Kemiringan minimum terpenuhi' if self.peak >= c.lean_min else 'Condongkan badan lebih ke depan'
-            self.standing_checks={'height':bool(p>=c.stand_progress),'hip':bool(hip>=180-c.straight_tolerance),'knee':bool(knee>=180-c.straight_tolerance)}
+            hip_target,knee_target=self.standing_targets()
+            self.standing_checks={'height':bool(p>=c.stand_progress),'hip':bool(hip>=hip_target),'knee':bool(knee>=knee_target)}
             geometry_ok=all(self.standing_checks.values())
             plateau_stable=self.standing_filter.update(t,p,geometry_ok,c.stable_speed)
             # Fast stopping keeps the existing short-window path. A sustained
@@ -210,7 +235,7 @@ class Engine:
                 return ('Berdiri belum terkonfirmasi: data terputus' if self.results[-1]['bangkit_lengkap'] is None else 'Syarat berdiri lengkap belum terpenuhi')
             blocked=', '.join(k for k,ok in self.standing_checks.items() if not ok)
             return 'Berdiri: menunggu '+(blocked or 'stabil 0.3 detik')
-        if self.held('return', p <= c.seated_progress and hip < 120, t):
+        if self.held('return', p <= c.seated_progress and self.seated_geometry(hip), t):
             self.sitting_samples.clear()
             self.sitting_evidence.clear()
             self.cycles += 1
@@ -277,9 +302,8 @@ class Engine:
         if not criteria[1]: reasons.append('Kemiringan minimum belum terpenuhi')
         if not confirmed: reasons.append(standing_message)
         if self.observation_missing: reasons.append('Pengamatan terputus selama percobaan')
-        from assessment import stage_report
-        report = stage_report(self.initial_sitting_details, self.initial_sitting, self.peak, success, self.observation_missing, self.standing_measurements, self.cfg)
-        self.results.append(dict(duduk_awal_metode=self.initial_sitting_source,penilaian_tahap=report, acuan="Aturan operasional PDF; toleransi sementara pada config", bantuan_tangan_dinilai=False, start_time=float(self.start), end_time=float(t), status_berdiri=standing_status, pesan_berdiri=standing_message, duduk_awal_waktu=self.initial_sitting_t, duduk_terakhir_riwayat=self.sitting_history, duduk_awal_pengukuran=dict(self.initial_sitting_details), berdiri_diagnostik={"last_checks":dict(self.standing_checks),"blocked_frame_counts":dict(self.standing_blockers),"best_hold_seconds":float(self.best_standing_hold),"stability":dict(self.stability_details)}, duduk_awal_sesuai=self.initial_sitting, status_sts=status, alasan=reasons, sts_memenuhi=(all(criteria) if status != 'BELUM DAPAT DINILAI' else None), kedua_kriteria_terpenuhi=(None if standing_unknown else bool(success and self.peak >= self.cfg.lean_min)), bangkit_lengkap=success, kemiringan_puncak=round(float(self.peak), 2), minimum_terpenuhi=bool(self.peak >= self.cfg.lean_min), durasi=round(float(t-self.start), 2), indikasi_tangan=self.hand_hint))
+        report = self.make_report(success)
+        self.results.append(dict(duduk_awal_metode=self.initial_sitting_source,penilaian_tahap=report, acuan=getattr(self,"reference_label","Aturan operasional PDF; toleransi sementara pada config"), bantuan_tangan_dinilai=False, start_time=float(self.start), end_time=float(t), status_berdiri=standing_status, pesan_berdiri=standing_message, duduk_awal_waktu=self.initial_sitting_t, duduk_terakhir_riwayat=self.sitting_history, duduk_awal_pengukuran=dict(self.initial_sitting_details), berdiri_diagnostik={"last_checks":dict(self.standing_checks),"blocked_frame_counts":dict(self.standing_blockers),"best_hold_seconds":float(self.best_standing_hold),"stability":dict(self.stability_details)}, duduk_awal_sesuai=self.initial_sitting, status_sts=status, alasan=reasons, sts_memenuhi=(all(criteria) if status != 'BELUM DAPAT DINILAI' else None), kedua_kriteria_terpenuhi=(None if standing_unknown else bool(success and self.peak >= self.cfg.lean_min)), bangkit_lengkap=success, kemiringan_puncak=round(float(self.peak), 2), minimum_terpenuhi=bool(self.peak >= self.cfg.lean_min), durasi=round(float(t-self.start), 2), indikasi_tangan=self.hand_hint))
         self.complete += int(confirmed)
         self.last_sitting = None
         self.last_sitting_t = None
